@@ -129,6 +129,10 @@ func (s *LivepeerServer) StartWebserver() {
 
 	//Activate the transcoder on-chain.
 	http.HandleFunc("/activateTranscoder", func(w http.ResponseWriter, r *http.Request) {
+		accountAddr := s.LivepeerNode.Eth.Account().Address
+		bondingManager := s.LivepeerNode.Eth.BondingManager()
+
+		t, err := bondingManager.getTranscoder(accountAddr)
 		registered, err := s.LivepeerNode.Eth.IsRegisteredTranscoder()
 		if err != nil {
 			glog.Errorf("Error checking for registered transcoder: %v", err)

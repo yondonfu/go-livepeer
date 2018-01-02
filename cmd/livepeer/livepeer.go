@@ -46,7 +46,7 @@ import (
 
 var ErrKeygen = errors.New("ErrKeygen")
 var EthRpcTimeout = 10 * time.Second
-var EthEventTimeout = 120 * time.Second
+var EthTxTimeout = 120 * time.Second
 var ErrIpfs = errors.New("ErrIpfs")
 
 func main() {
@@ -181,53 +181,6 @@ func main() {
 	if *offchain {
 		glog.Infof("***Livepeer is in off-chain mode***")
 	} else {
-		var acct accounts.Account
-		var keystoreDir string
-		if _, err := os.Stat(*ethKeyPath); !os.IsNotExist(err) {
-			//Try loading eth key from ethKeyPath
-			data, err := ioutil.ReadFile(*ethKeyPath)
-			if err != nil {
-				glog.Errorf("Cannot read key from %v", *ethKeyPath)
-				return
-			}
-
-			var objmap map[string]*json.RawMessage
-			if err := json.Unmarshal(data, &objmap); err != nil {
-				glog.Errorf("Cannot parse key from %v", *ethKeyPath)
-				return
-			}
-			var addr string
-			if err := json.Unmarshal(*objmap["address"], &addr); err != nil {
-				glog.Errorf("Cannot find address in %v", *ethKeyPath)
-				return
-			}
-			keystoreDir, _ = filepath.Split(*ethKeyPath)
-			acct, err = getEthAccount(keystoreDir, addr)
-			if err != nil {
-				glog.Errorf("Cannot get account %v in %v", addr, keystoreDir)
-				return
-			}
-		} else {
-			keystoreDir = filepath.Join(*datadir, "keystore")
-			//Try loading eth key from datadir
-			if _, err := os.Stat(keystoreDir); !os.IsNotExist(err) {
-				acct, err = getEthAccount(keystoreDir, *ethAcctAddr)
-				if err != nil {
-					glog.Errorf("Cannot get account %v from %v", *ethAcctAddr, *datadir)
-					if acct, *ethPassword, err = createEthAccount(keystoreDir); err != nil {
-						glog.Errorf("Cannot create Eth account.")
-						return
-					}
-				}
-			} else {
-				//Try to create a new Eth key
-				if acct, *ethPassword, err = createEthAccount(keystoreDir); err != nil {
-					glog.Errorf("Cannot create Eth account.")
-					return
-				}
-			}
-		}
-
 		if acct.Address.Hex() == "0x0000000000000000000000000000000000000000" {
 			glog.Errorf("Cannot find eth account")
 			return
@@ -293,82 +246,65 @@ func main() {
 		}
 
 		var client *eth.Client
-		for firstTime := true; ; {
-			client, err = eth.NewClient(acct, *ethPassword, keystoreDir, backend, big.NewInt(int64(*gasPrice)), common.HexToAddress(*controllerAddr), EthRpcTimeout, EthEventTimeout)
-			if err != nil {
-				if err == keystore.ErrDecrypt {
-					if !firstTime {
-						glog.Infof("Error decrypting using passphrase. Please provide the passphrase again.")
-					} else {
-						glog.Infof("Please provide the passphrase.")
-						firstTime = false
-					}
-					*ethPassword = getPassphrase(false)
-					continue
-				}
-				glog.Errorf("Error creating Eth client: %v", err)
-				return
-			}
-			break
-		}
-		n.Eth = client
-		n.EthAccount = acct.Address.String()
-		n.EthPassword = *ethPassword
-
-		//Create LogMonitor, the addresses act as filters.
-		var logMonitor *eth.LogMonitor
-		if *transcoder {
-			logMonitor = eth.NewLogMonitor(client, common.Address{})
-		} else {
-			logMonitor = eth.NewLogMonitor(client, client.Account().Address)
-		}
-
-		if *transcoder {
-			if err := setupTranscoder(n, logMonitor); err != nil {
-				glog.Errorf("Error setting up transcoder: %v", err)
-				return
-			}
-		}
-	}
-
-	if *transcoder {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		ipfsApi, err := ipfs.StartIpfs(ctx, *ipfsPath)
+		client = eth.NewClient(*ethAcctAddr, *ethKeyPath, backend, *controllerAddr, EthTxTimeout)
+		err = client.Setup(*gasLimit, *gasPrice)
 		if err != nil {
-			glog.Errorf("Error starting ipfs: %v", err)
+			glog.Errorf("Error setting up LP client: %v", err)
 			return
 		}
 
-		n.Ipfs = ipfsApi
+		glog.Infof("Set up LP client: \n%v", client.String())
+
+		n.Eth = client
+		n.EthAccount = *ethAcctAddr
+		n.EthPassword = *ethPassword
+
+		// if *transcoder {
+		// 	if err := setupTranscoder(n, logMonitor); err != nil {
+		// 		glog.Errorf("Error setting up transcoder: %v", err)
+		// 		return
+		// 	}
+		// }
 	}
 
-	//Set up the media server
-	s := server.NewLivepeerServer(*rtmpPort, *httpPort, "", n)
-	ec := make(chan error)
-	msCtx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// if *transcoder {
+	// 	ctx, cancel := context.WithCancel(context.Background())
+	// 	defer cancel()
 
-	go func() {
-		s.StartWebserver()
-		ec <- s.StartMediaServer(msCtx, *maxPricePerSegment, *transcodingOptions)
-	}()
+	// 	ipfsApi, err := ipfs.StartIpfs(ctx, *ipfsPath)
+	// 	if err != nil {
+	// 		glog.Errorf("Error starting ipfs: %v", err)
+	// 		return
+	// 	}
 
-	c := make(chan os.Signal)
-	signal.Notify(c, os.Interrupt)
-	select {
-	case err := <-ec:
-		glog.Infof("Error from media server: %v", err)
-		return
-	case <-msCtx.Done():
-		glog.Infof("MediaServer Done()")
-		return
-	case sig := <-c:
-		glog.Infof("Exiting Livepeer: %v", sig)
-		time.Sleep(time.Millisecond * 500) //Give time for other processes to shut down completely
-		return
-	}
+	// 	n.Ipfs = ipfsApi
+	// }
+
+	// //Set up the media server
+	// s := server.NewLivepeerServer(*rtmpPort, *httpPort, "", n)
+	// ec := make(chan error)
+	// msCtx, cancel := context.WithCancel(context.Background())
+	// defer cancel()
+
+	// go func() {
+	// 	s.StartWebserver()
+	// 	ec <- s.StartMediaServer(msCtx, *maxPricePerSegment, *transcodingOptions)
+	// }()
+
+	// c := make(chan os.Signal)
+	// signal.Notify(c, os.Interrupt)
+	// select {
+	// case err := <-ec:
+	// 	glog.Infof("Error from media server: %v", err)
+	// 	return
+	// case <-msCtx.Done():
+	// 	glog.Infof("MediaServer Done()")
+	// 	return
+	// case sig := <-c:
+	// 	glog.Infof("Exiting Livepeer: %v", sig)
+	// 	time.Sleep(time.Millisecond * 500) //Give time for other processes to shut down completely
+	// 	return
+	// }
 }
 
 type LPKeyFile struct {
@@ -457,93 +393,72 @@ func getLPKeys(datadir string) (crypto.PrivKey, crypto.PubKey, error) {
 	return priv, pub, nil
 }
 
-func getEthAccount(keystoreDir string, addr string) (accounts.Account, error) {
-	keyStore := keystore.NewKeyStore(keystoreDir, keystore.StandardScryptN, keystore.StandardScryptP)
-	accts := keyStore.Accounts()
-	if len(accts) == 0 {
-		return accounts.Account{}, fmt.Errorf("ErrGeth")
-	}
+// func setupTranscoder(n *core.LivepeerNode, lm *eth.LogMonitor) error {
+// 	//Check if transcoder is active
+// 	active, err := n.Eth.IsActiveTranscoder()
+// 	if err != nil {
+// 		glog.Errorf("Error getting transcoder state: %v", err)
+// 		return err
+// 	}
 
-	if addr != "" {
-		for _, acct := range accts {
-			if acct.Address == common.HexToAddress(addr) {
-				return acct, nil
-			}
-		}
+// 	if !active {
+// 		glog.Infof("Transcoder %v is inactive", n.Eth.Account().Address.Hex())
+// 	} else {
+// 		s, err := n.Eth.TranscoderStake()
+// 		if err != nil {
+// 			glog.Errorf("Error getting transcoder stake: %v", err)
+// 		}
+// 		glog.Infof("Transcoder Active. Total Stake: %v", s)
+// 	}
 
-		glog.Errorf("Cannot find geth account")
-		return accounts.Account{}, fmt.Errorf("ErrGeth")
-	}
+// 	rm := core.NewRewardManager(time.Second*5, n.Eth)
+// 	go rm.Start(context.Background())
 
-	return accts[0], nil
-}
+// 	//Set up callback for when a job is assigned to us (via monitoring the eth log)
+// 	lm.SubscribeToJobEvents(func(job *eth.Job) {
+// 		//Check if broadcaster has enough funds
+// 		bDeposit, err := n.Eth.GetBroadcasterDeposit(job.BroadcasterAddress)
+// 		if err != nil {
+// 			glog.Errorf("Error getting broadcaster deposit: %v", err)
+// 			return
+// 		}
+// 		if bDeposit.Cmp(big.NewInt(0)) == 0 {
+// 			glog.Errorf("Broadcaster does not have enough funds. Skipping job")
+// 			return
+// 		}
 
-func setupTranscoder(n *core.LivepeerNode, lm *eth.LogMonitor) error {
-	//Check if transcoder is active
-	active, err := n.Eth.IsActiveTranscoder()
-	if err != nil {
-		glog.Errorf("Error getting transcoder state: %v", err)
-		return err
-	}
+// 		//Create transcode config, make sure the profiles are sorted
+// 		tProfiles, err := txDataToVideoProfile(job.TranscodingOptions)
+// 		if err != nil {
+// 			glog.Errorf("Error processing job transcoding options: %v", err)
+// 			return
+// 		}
 
-	if !active {
-		glog.Infof("Transcoder %v is inactive", n.Eth.Account().Address.Hex())
-	} else {
-		s, err := n.Eth.TranscoderStake()
-		if err != nil {
-			glog.Errorf("Error getting transcoder stake: %v", err)
-		}
-		glog.Infof("Transcoder Active. Total Stake: %v", s)
-	}
+// 		config := net.TranscodeConfig{StrmID: job.StreamId, Profiles: tProfiles, JobID: job.JobId, PerformOnchainClaim: true}
+// 		glog.Infof("Transcoder got job %v - strmID: %v, tData: %v, config: %v", job.JobId, job.StreamId, job.TranscodingOptions, config)
 
-	rm := core.NewRewardManager(time.Second*5, n.Eth)
-	go rm.Start(context.Background())
+// 		//Do The Transcoding
+// 		cm := core.NewBasicClaimManager(job.StreamId, job.JobId, job.BroadcasterAddress, job.MaxPricePerSegment, tProfiles, n.Eth, n.Ipfs)
+// 		tr := transcoder.NewFFMpegSegmentTranscoder(tProfiles, "", n.WorkDir)
+// 		strmIDs, err := n.TranscodeAndBroadcast(config, cm, tr)
+// 		if err != nil {
+// 			glog.Errorf("Transcode Error: %v", err)
+// 			return
+// 		}
 
-	//Set up callback for when a job is assigned to us (via monitoring the eth log)
-	lm.SubscribeToJobEvents(func(job *eth.Job) {
-		//Check if broadcaster has enough funds
-		bDeposit, err := n.Eth.GetBroadcasterDeposit(job.BroadcasterAddress)
-		if err != nil {
-			glog.Errorf("Error getting broadcaster deposit: %v", err)
-			return
-		}
-		if bDeposit.Cmp(big.NewInt(0)) == 0 {
-			glog.Errorf("Broadcaster does not have enough funds. Skipping job")
-			return
-		}
+// 		//Notify Broadcaster
+// 		sid := core.StreamID(job.StreamId)
+// 		vids := make(map[core.StreamID]lpmscore.VideoProfile)
+// 		for i, vp := range tProfiles {
+// 			vids[strmIDs[i]] = vp
+// 		}
+// 		if err = n.NotifyBroadcaster(sid.GetNodeID(), sid, vids); err != nil {
+// 			glog.Errorf("Notify Broadcaster Error: %v", err)
+// 		}
+// 	})
 
-		//Create transcode config, make sure the profiles are sorted
-		tProfiles, err := txDataToVideoProfile(job.TranscodingOptions)
-		if err != nil {
-			glog.Errorf("Error processing job transcoding options: %v", err)
-			return
-		}
-
-		config := net.TranscodeConfig{StrmID: job.StreamId, Profiles: tProfiles, JobID: job.JobId, PerformOnchainClaim: true}
-		glog.Infof("Transcoder got job %v - strmID: %v, tData: %v, config: %v", job.JobId, job.StreamId, job.TranscodingOptions, config)
-
-		//Do The Transcoding
-		cm := core.NewBasicClaimManager(job.StreamId, job.JobId, job.BroadcasterAddress, job.MaxPricePerSegment, tProfiles, n.Eth, n.Ipfs)
-		tr := transcoder.NewFFMpegSegmentTranscoder(tProfiles, "", n.WorkDir)
-		strmIDs, err := n.TranscodeAndBroadcast(config, cm, tr)
-		if err != nil {
-			glog.Errorf("Transcode Error: %v", err)
-			return
-		}
-
-		//Notify Broadcaster
-		sid := core.StreamID(job.StreamId)
-		vids := make(map[core.StreamID]lpmscore.VideoProfile)
-		for i, vp := range tProfiles {
-			vids[strmIDs[i]] = vp
-		}
-		if err = n.NotifyBroadcaster(sid.GetNodeID(), sid, vids); err != nil {
-			glog.Errorf("Notify Broadcaster Error: %v", err)
-		}
-	})
-
-	return nil
-}
+// 	return nil
+// }
 
 func txDataToVideoProfile(txData string) ([]lpmscore.VideoProfile, error) {
 	profiles := make([]lpmscore.VideoProfile, 0)
@@ -641,33 +556,4 @@ func broadcast(rtmpPort int, httpPort int) {
 	} else {
 		glog.Errorf("The broadcast command only support darwin for now.  Please download OBS to broadcast.")
 	}
-}
-
-func createEthAccount(keystoreDir string) (acct accounts.Account, passphrase string, err error) {
-	if err := os.Mkdir(keystoreDir, 0755); err != nil {
-		glog.Errorf("Error creating datadir: %v", err)
-	}
-
-	glog.Infoln("Creating a new Ethereum account.  Your new account is locked with a password. Please give a password. Do not forget this password.")
-	passphrase = getPassphrase(true)
-	keyStore := keystore.NewKeyStore(keystoreDir, keystore.StandardScryptN, keystore.StandardScryptP)
-	acct, err = keyStore.NewAccount(passphrase)
-	return
-}
-
-func getPassphrase(confirmation bool) string {
-	password, err := console.Stdin.PromptPassword("Passphrase: ")
-	if err != nil {
-		utils.Fatalf("Failed to read passphrase: %v", err)
-	}
-	if confirmation {
-		confirm, err := console.Stdin.PromptPassword("Repeat passphrase: ")
-		if err != nil {
-			utils.Fatalf("Failed to read passphrase confirmation: %v", err)
-		}
-		if password != confirm {
-			utils.Fatalf("Passphrases do not match")
-		}
-	}
-	return password
 }
